@@ -1,6 +1,8 @@
 # example of defining a 70x70 patchgan discriminator model
 import datetime
+import time
 import tensorflow as tf
+import tensorflow_addons as tfa
 from matplotlib import pyplot
 from random import random
 from numpy import load
@@ -17,10 +19,16 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow_addons.layers.normalizations import InstanceNormalization
 from tensorflow.keras.models import load_model
 from tensorboard.plugins.hparams import api as hp
+from tensorflow import Tensor
+from tensorflow.keras.layers import Input, Conv2D, ReLU, BatchNormalization, Add, AveragePooling2D, Flatten, Dense
+from tensorflow.keras.models import Model
+from tensorflow.keras import layers
 
-# define the discriminator model
+from tensorflow.keras.layers.experimental.preprocessing import Rescaling
 
+from vit import VisionTransformer
 
+# define the discriminator models
 def define_discriminator(image_shape):
 	# weight initialization
 	init = RandomNormal(stddev=0.02)
@@ -57,6 +65,54 @@ def define_discriminator(image_shape):
 	model.compile(loss='mse', optimizer=Adam(
 	    learning_rate=0.0002, beta_1=0.5), loss_weights=[0.5])
 	return model
+
+def define_custom_discriminator_II(image_shape):
+	model = VisionTransformer(
+		image_size=256,
+		patch_size=16,
+		num_layers=4,
+		num_classes=2,
+		d_model=64,
+		num_heads=4,
+		mlp_dim=128,
+		channels=3,
+		dropout=0.1,
+	)
+	model.compile(
+		loss=tf.keras.losses.SparseCategoricalCrossentropy(
+		    from_logits=True
+		),
+		optimizer=tfa.optimizers.AdamW(
+			learning_rate=3e-4, weight_decay=1e-4
+		),
+		metrics=["accuracy"],
+	)
+	return model
+
+def relu_bn(inputs: Tensor) -> Tensor:
+    relu = ReLU()(inputs)
+    bn = BatchNormalization()(relu)
+    return bn
+
+def residual_block(x: Tensor, downsample: bool, filters: int, kernel_size: int = 3) -> Tensor:
+    y = Conv2D(kernel_size=kernel_size,
+               strides= (1 if not downsample else 2),
+               filters=filters,
+               padding="same")(x)
+    y = relu_bn(y)
+    y = Conv2D(kernel_size=kernel_size,
+               strides=1,
+               filters=filters,
+               padding="same")(y)
+
+    if downsample:
+        x = Conv2D(kernel_size=1,
+                   strides=2,
+                   filters=filters,
+                   padding="same")(x)
+    out = Add()([x, y])
+    out = relu_bn(out)
+    return out
 
 # generator a resnet block
 
@@ -119,8 +175,8 @@ def define_generator(image_shape, n_resnet=9):
 	model = Model(in_image, out_image)
 	return model
 
-# define a composite model for updating generators by adversarial and cycle loss
 
+# define a composite model for updating generators by adversarial and cycle loss
 
 def define_composite_model(g_model_1, d_model, g_model_2, image_shape):
 	# ensure the model we're updating is trainable
@@ -228,6 +284,31 @@ def summarize_performance(step, g_model, trainX, name, n_samples=5):
 	pyplot.savefig(filename1)
 	pyplot.close()
 
+def generate_final_images(g_model, trainX, name, n_samples=5,):
+	randint.seed(12345)
+	ix = randint(0, trainX.shape[0], n_samples)
+	# select a sample of input images
+	X_in = trainX[ix]
+	# generate translated images
+	X_out, _ = generate_fake_samples(g_model, X_in, 0)
+	# scale all pixels from [-1,1] to [0,1]
+	X_in = (X_in + 1) / 2.0
+	X_out = (X_out + 1) / 2.0
+	# plot real images
+	for i in range(n_samples):
+		pyplot.subplot(2, n_samples, 1 + i)
+		pyplot.axis('off')
+		pyplot.imshow(X_in[i])
+	# plot translated image
+	for i in range(n_samples):
+		pyplot.subplot(2, n_samples, 1 + n_samples + i)
+		pyplot.axis('off')
+		pyplot.imshow(X_out[i])
+	# save plot to file
+	filename1 = '%s_generated_plot_%06d.png' % (name, "Final")
+	pyplot.savefig(filename1)
+	pyplot.close()
+
 # update image pool for fake images
 
 
@@ -253,7 +334,7 @@ def update_image_pool(pool, images, max_size=50):
 
 def train(d_model_A, d_model_B, g_model_AtoB, g_model_BtoA, c_model_AtoB, c_model_BtoA, dataset):
 	# define properties of the training run
-	n_epochs, n_batch, = 10, 1
+	n_epochs, n_batch, = 5, 1
 	# determine the output square shape of the discriminator
 	n_patch = d_model_A.output_shape[1]
 	# unpack dataset
@@ -264,38 +345,51 @@ def train(d_model_A, d_model_B, g_model_AtoB, g_model_BtoA, c_model_AtoB, c_mode
 	bat_per_epo = int(len(trainA) / n_batch)
 	# calculate the number of training iterations
 	n_steps = bat_per_epo * n_epochs
-	# manually enumerate epochs
-	for i in range(n_steps):
-		# select a batch of real samples
-		X_realA, y_realA = generate_real_samples(trainA, n_batch, n_patch)
-		X_realB, y_realB = generate_real_samples(trainB, n_batch, n_patch)
-		# generate a batch of fake samples
-		X_fakeA, y_fakeA = generate_fake_samples(g_model_BtoA, X_realB, n_patch)
-		X_fakeB, y_fakeB = generate_fake_samples(g_model_AtoB, X_realA, n_patch)
-		# update fakes from pool
-		X_fakeA = update_image_pool(poolA, X_fakeA)
-		X_fakeB = update_image_pool(poolB, X_fakeB)
-		# update generator B->A via adversarial and cycle loss
-		g_loss2, _, _, _, _  = c_model_BtoA.train_on_batch([X_realB, X_realA], [y_realA, X_realA, X_realB, X_realA])
-		# update discriminator for A -> [real/fake]
-		dA_loss1 = d_model_A.train_on_batch(X_realA, y_realA)
-		dA_loss2 = d_model_A.train_on_batch(X_fakeA, y_fakeA)
-		# update generator A->B via adversarial and cycle loss
-		g_loss1, _, _, _, _ = c_model_AtoB.train_on_batch([X_realA, X_realB], [y_realB, X_realB, X_realA, X_realB])
-		# update discriminator for B -> [real/fake]
-		dB_loss1 = d_model_B.train_on_batch(X_realB, y_realB)
-		dB_loss2 = d_model_B.train_on_batch(X_fakeB, y_fakeB)
-		# summarize performance
-		print('>%d, dA[%.3f,%.3f] dB[%.3f,%.3f] g[%.3f,%.3f]' % (i+1, dA_loss1,dA_loss2, dB_loss1,dB_loss2, g_loss1,g_loss2))
-		# evaluate the model performance every so often
-		if (i+1) % ((bat_per_epo/3) * 1) == 0:
-			# plot A->B translation
-			summarize_performance(i, g_model_AtoB, trainA, 'AtoB')
-			# plot B->A translation
-			summarize_performance(i, g_model_BtoA, trainB, 'BtoA')
-		if (i+1) % (bat_per_epo * 5) == 0:
-			# save the models
-			save_models(i, g_model_AtoB, g_model_BtoA)
+	with open("log.txt", "w") as logFile:
+		with open("log.csv", "w") as  csvFile:
+			trainStart = time.time()
+			# manually enumerate epochs
+			for i in range(n_steps):
+				# select a batch of real samples
+				X_realA, y_realA = generate_real_samples(trainA, n_batch, n_patch)
+				X_realB, y_realB = generate_real_samples(trainB, n_batch, n_patch)
+				# generate a batch of fake samples
+				X_fakeA, y_fakeA = generate_fake_samples(g_model_BtoA, X_realB, n_patch)
+				X_fakeB, y_fakeB = generate_fake_samples(g_model_AtoB, X_realA, n_patch)
+				# update fakes from pool
+				X_fakeA = update_image_pool(poolA, X_fakeA)
+				X_fakeB = update_image_pool(poolB, X_fakeB)
+				# update generator B->A via adversarial and cycle loss
+				g_loss2, _, _, _, _  = c_model_BtoA.train_on_batch([X_realB, X_realA], [y_realA, X_realA, X_realB, X_realA])
+				# update discriminator for A -> [real/fake]
+				dA_loss1 = d_model_A.train_on_batch(X_realA, y_realA)
+				dA_loss2 = d_model_A.train_on_batch(X_fakeA, y_fakeA)
+				# update generator A->B via adversarial and cycle loss
+				g_loss1, _, _, _, _ = c_model_AtoB.train_on_batch([X_realA, X_realB], [y_realB, X_realB, X_realA, X_realB])
+				# update discriminator for B -> [real/fake]
+				dB_loss1 = d_model_B.train_on_batch(X_realB, y_realB)
+				dB_loss2 = d_model_B.train_on_batch(X_fakeB, y_fakeB)
+				# summarize performance
+				print(i+1, dA_loss1,dA_loss2, dB_loss1,dB_loss2, g_loss1,g_loss2)
+				print('>%d, dA[%.3f,%.3f] dB[%.3f,%.3f] g[%.3f,%.3f]' % (i+1, dA_loss1,dA_loss2, dB_loss1,dB_loss2, g_loss1,g_loss2))
+				logFile.write('>%d, dA[%.3f,%.3f] dB[%.3f,%.3f] g[%.3f,%.3f]\n' % (i+1, dA_loss1,dA_loss2, dB_loss1,dB_loss2, g_loss1,g_loss2))
+				csvFile.write('%d;%.3f;%.3f;%.3f;%.3f;%.3f;%.3f;\n' % (i+1, dA_loss1,dA_loss2, dB_loss1,dB_loss2, g_loss1,g_loss2))
+				# evaluate the model performance every so often
+				if (i+1) % (int(bat_per_epo/10) * 1) == 0:
+					# plot A->B translation
+					summarize_performance(i, g_model_AtoB, trainA, 'AtoB')
+					# plot B->A translation
+					summarize_performance(i, g_model_BtoA, trainB, 'BtoA')
+				if (i+1) % (bat_per_epo * 5) == 0:
+					# save the models
+					print("Saving model")
+					try:
+						save_models(i, g_model_AtoB, g_model_BtoA)
+					except:
+						print("Time to find a new Master's ¯\_(ツ)_/¯")
+			logFile.write("Training completed in (s): %.2f" % (time.time()-trainStart))
+			generate_final_images(g_model_BtoA, n_patch, n_patch)
+			generate_final_images(g_model_AtoB, n_patch, n_patch)
 
 # Tensorboard logging
 log_dir= "/logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -303,7 +397,7 @@ tensorboard_callback = tf.keras.callbacks.TensorBoard(
     log_dir=log_dir, histogram_freq=1)
 
 # load image data
-dataset = load_real_samples('horse2zebra_256.npz')
+dataset = load_real_samples('summer2winter_256.npz')
 print('Loaded', dataset[0].shape, dataset[1].shape)
 # define input shape based on the loaded dataset
 image_shape = dataset[0].shape[1:]
@@ -311,10 +405,13 @@ image_shape = dataset[0].shape[1:]
 g_model_AtoB = define_generator(image_shape)
 # generator: B -> A
 g_model_BtoA = define_generator(image_shape)
+plot_model(g_model_BtoA, to_file="generator.png", show_shapes=True)
 # discriminator: A -> [real/fake]
-d_model_A = define_discriminator(image_shape)
+d_model_A = define_custom_discriminator_II(image_shape)
 # discriminator: B -> [real/fake]
-d_model_B = define_discriminator(image_shape)
+d_model_B = define_custom_discriminator_II(image_shape)
+d_model_B.build(image_shape)
+plot_model(d_model_B, to_file="discriminator.png", show_shapes=True)
 # composite: A -> B -> [real/fake, A]
 c_model_AtoB = define_composite_model(g_model_AtoB, d_model_B, g_model_BtoA, image_shape)
 # composite: B -> A -> [real/fake, B]

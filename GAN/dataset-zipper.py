@@ -30,7 +30,7 @@ def select_fraction(data, fraction=1):
 
 
 # dataset path
-path = 'Unmodified Dataset/'
+path = '../Unmodified Dataset/'
 # fraction of the dataset to use
 trainingFraction = 1
 testFraction = 1
