@@ -3,9 +3,10 @@ import tensorflow_addons as tfa
 from tensorflow.keras.layers import (
     Dense,
     Dropout,
-    LayerNormalization,
+    LayerNormalization
 )
 from tensorflow.keras.layers.experimental.preprocessing import Rescaling
+
 import numpy as np
 
 class MultiHeadSelfAttention(tf.keras.layers.Layer):
@@ -75,7 +76,6 @@ class TransformerBlock(tf.keras.layers.Layer):
         ffn_output = self.dropout2(ffn_output, training=training)
         return self.layernorm2(out1 + ffn_output)
 
-
 class VisionTransformer(tf.keras.Model):
     def __init__(
         self,
@@ -114,19 +114,20 @@ class VisionTransformer(tf.keras.Model):
                 Dense(num_classes),
             ]
         )
-    ##################################
+
     def extract_patches(self, images):
+        tf.reshape(images, [-1, 256, 256, 3])
         batch_size = tf.shape(images)[0]
         patches = tf.image.extract_patches(
             images=images,
             sizes=[1, self.patch_size, self.patch_size, 1],
             strides=[1, self.patch_size, self.patch_size, 1],
             rates=[1, 1, 1, 1],
-            padding="VALID",
+            padding="SAME",
         )
         patches = tf.reshape(patches, [batch_size, -1, self.patch_dim])
         return patches
-    ###################################
+
     def call(self, x, training):
         batch_size = tf.shape(x)[0]
         x = self.rescale(x)
