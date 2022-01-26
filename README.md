@@ -6,3 +6,11 @@ This project is combines the work of two separate repositories:
 with Python" by Jason Brownlee
 and:
 ```https://github.com/tuvovan/Vision_Transformer_Keras```
+
+Contributors to this project listed below:
+- P.W.O. van Aken
+- F.L.G. Blom
+- R.R. Cuevas
+- J.A.W. Markus
+- M.A. Scheeres
+- A. Tsiamis
